@@ -5,8 +5,8 @@ set.seed(12345)
 graphics.off()
 options(stringsAsFactors = FALSE)
 # load packages
-pkgs <- c("plyr", "limma", "Biobase", "ggplot2", "stringr", "edgeR", "GEOmetadb", "ggpubr",
-          "reshape2", "GEOquery", "pheatmap", "ggfortify", "readxl", "gplots", "export")
+pkgs <- c("dplyr", "Seurat", "cowplot", "tidyverse", "stringr", "reticulate", "ggpubr",
+          "scran", "pheatmap", "ggfortify", "readxl", "gplots", "export")
 # installpkgs <- function(pkgs) {
 #   new.pkgs <- pkgs[!(pkgs %in% installed.packages()[ , "Package"])]
 #   if (length(new.pkgs))
@@ -16,21 +16,7 @@ pkgs <- c("plyr", "limma", "Biobase", "ggplot2", "stringr", "edgeR", "GEOmetadb"
 # installpkgs(pkgs)
 lapply(pkgs, library, character.only = T)
 
-
-rm(list=ls())
-gc()
-options(stringsAsFactors=FALSE)
-# load packages
-library(dplyr)
-library(export)
-library(Seurat)
-library(cowplot)
-library(tidyverse)
-library(reticulate)
-library(scater)
-library(scran)
-
-# load data
+## 1. Prepare rawdata to proceed
 if(!file.exists("GSE102130_gSet.Rdata")){
   gSet <- read.table("GSE102130_rawdata.txt", header = T)
   row.names(gSet) <- gSet[ , 1]
@@ -38,64 +24,96 @@ if(!file.exists("GSE102130_gSet.Rdata")){
   save(gSet, file = "GSE102130_gSet.Rdata")
 }
 load("GSE102130_gSet.Rdata")
+counts <- gSet
+# create annotationdata
+cellName <- as.character(colnames(counts))
+id <- strsplit(cellName, "[.]")
+names(id) <- cellName
+anno <- matrix(nrow = length(id), ncol = 3)
+for (i in 1:length(id)) {
+  anno[i, 1] <- cellName[i]
+  anno[i, 2] <- id[[i]][1]
+  anno[i, 3] <- id[[i]][2]
+}
+colnames(anno) <- c("cellName", "patientID", "plateID")
+rownames(anno) <- anno[ , 1]
+save(counts, anno, file = "GSE102130.Rdata")
 
-# create a Seurat objective
-sce <- CreateSeuratObject(
-  counts = as.matrix(gSet),
-  min.cells = 3,
-  min.features = 2500,
-  assay = "scRNA",
-  project="DIPG")
+## 2. Load counts to analyse 
+# load data
+load("GSE102130.Rdata")
+{
+  Anno1 <- anno[which(anno[ , 2] == "MUV1"), ]
+  Anno5 <- anno[which(anno[ , 2] == "MUV5"), ]
+  Anno10 <- anno[which(anno[ , 2] == "MUV10"), ]
+  Anno836 <- anno[which(anno[ , 2] == "BCH836"), ]
+  Anno869 <- anno[which(anno[ , 2] == "BCH869"), ]
+  Anno126 <- anno[which(anno[ , 2] == "BCH1126"), ]
+}
+Anno <- rbind(Anno1, Anno5, Anno10, Anno836, Anno869, Anno126)
+exprset <- counts[ , which(colnames(counts) %in% rownames(Anno))]
+save(Anno, exprset, file = "tmp.Rdata")
+# filter genes by the paper source: Ea = log2(average(TPMgene)+1) < 4 
+ave_row <- rowSums(exprset)/ncol(exprset)
+log_TPM <- as.matrix(log2(ave_row + 1))
+filter_by_Ea <- as.matrix(log_TPM[which(log_TPM >= 4), ])
+exprSet <- exprset[rownames(filter_by_Ea), ]
+# create a Seurat object and quick QC
+sce <- CreateSeuratObject(counts = as.matrix(exprSet),
+                          min.cells = 3, min.features = 200,
+                          assay = "scRNA", project="DIPG")
 dim(sce)
+save(sce, file = "sce_GSE102130.Rdata")
 
-# # cell QC
-# VlnPlot(sce, features = c("nFeature_RNA", "nCount_RNA"), ncol = 3)
-# plot1 <- FeatureScatter(scset, feature1 = "nCount_RNA", feature2 = "percent.mt")
-# plot2 <- FeatureScatter(scset, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
-# CombinePlots(plots = list(plot1, plot2))
-# scset <- subset(scset, subset = nFeature_RNA > 5000 & nFeature_RNA < 12500 & percent.mt < 5)
-# dim(scset)
-
-# Normalizing the data
+## 3. Single cell data analysis 
+# normalizing the data
+load("sce_GSE102130.Rdata")
 scset <- NormalizeData(sce, normalization.method = "LogNormalize", scale.factor = 10000)
-
-# Identification of highly variable features
+# identification of highly variable features
 scset <- FindVariableFeatures(scset, selection.method = "vst", nfeatures = 2000)
 top10 <- head(VariableFeatures(scset), 10)
-# Plot varible features with and without labels
+# plot varible features with and without labels
 plot1 <- VariableFeaturePlot(scset)
-plot2 <- LabelPoints(plot = plot1, points = top10)
-CombinePlots(plots = list(plot1, plot2))
-
-# Scaling the data
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = T)
+# scaling the data
 all.genes <- rownames(scset)
 scset <- ScaleData(scset, features = all.genes)
-
-# Perform linear dimensional reduction
+# perform linear dimensional reduction
 scset <- RunPCA(scset, features = VariableFeatures(object = scset))
+# examine and visualize PCA results by a few different ways:
+# 1). print the first 5 PCs with 5 genes
 print(scset[["pca"]], dims = 1:5, nfeatures = 5)
+# 2). plot the vizplot of each PC according to features
 VizDimLoadings(scset, dims = 1:2, reduction = "pca")
+# 3). PCA scatter plot
 DimPlot(scset, reduction = "pca")
+# 4). heatmap to decide those PCs according to PCA scores
 DimHeatmap(scset, dims = 1, cells = 500, balanced = TRUE)
-DimHeatmap(scset, dims = 1:15, cells = 500, balanced = TRUE)
-
-# Determine the dimensionality of the dataset
+DimHeatmap(scset, dims = 1:20, cells = 500, balanced = TRUE)
+# determine the dimensionality of the dataset by a few different ways:
+# 1). JackStraw for resampling test to enrich the lowest p-value
 scset <- JackStraw(scset, num.replicate = 100)
 scset <- ScoreJackStraw(scset, dims = 1:20)
-JackStrawPlot(scset, dims = 1:15)
+# find the sharp drop-off in significance after the first PCs.
+JackStrawPlot(scset, dims = 1:20)
+# 2). ElbowPlot to rank of principle components based on the percentage of variance,
+# and find the  ¡®elbow¡¯ around PCs that capture the majority of true signals
 ElbowPlot(scset)
+save(scset, file = "scset_GSE102130.Rdata")
 
-# Cluster the cells
-scset <- FindNeighbors(scset, dims = 1:15)
-scset <- FindClusters(scset, resolution = 0.5)
+## 4. Downstream analysis
+# cluster the cells
+scset <- FindNeighbors(scset, dims = 1:10)
+scset <- FindClusters(scset, resolution = 0.15)
 head(Idents(scset), 6)
-
-# Run non-linear dimensional reduction(UMAP/tSNE)
+# run non-linear dimensional reduction(tSNE/UMAP):
+# tSNE plot
+scset <- RunTSNE(scset, dims = 1:20)
+DimPlot(scset, reduction = "tsne", label = T, label.size = 5)
+# UMAP plot
 scset <- RunUMAP(scset, dims = 1:10)
 DimPlot(scset, reduction = "umap", pt.size = 1)
-scset <- RunTSNE(scset, dims = 1:10)
-DimPlot(scset, reduction = "tsne")
-
+#-----------------Start from here---------------------------
 # Find cluster biomarker
 scset.markers <- FindAllMarkers(scset, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
 scset.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC)
@@ -262,5 +280,5 @@ sessionInfo()
 #           Date: 2020/07/12 #
 # Revised author: Resonance  #
 #     1st revise: 2020/07/12 #
-#     2nd revise: 2020/XX/XX #
+#     2nd revise: 2020/07/13 #
 #============================#
